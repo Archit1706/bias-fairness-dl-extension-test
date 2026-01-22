@@ -50,6 +50,9 @@ class CausalDebugger:
 
                 # Get activations at this layer
                 activations = self.model.get_layer_output(x.unsqueeze(0), layer_idx)
+                # Ensure activations has proper shape
+                if activations.dim() == 1:
+                    activations = activations.unsqueeze(0)
 
                 # Compute gradient of activations w.r.t. input
                 grad_outputs = torch.ones_like(activations)
@@ -99,7 +102,11 @@ class CausalDebugger:
 
             with torch.no_grad():
                 # Get activations at this layer
-                activations = self.model.get_layer_output(x.unsqueeze(0), layer_idx)[0]
+                activations = self.model.get_layer_output(x.unsqueeze(0), layer_idx)
+                # Ensure activations has batch dimension before indexing
+                if activations.dim() == 1:
+                    activations = activations.unsqueeze(0)
+                activations = activations[0]
 
                 # Each neuron's activation magnitude = its impact
                 neuron_impacts += activations.abs().cpu().numpy()
