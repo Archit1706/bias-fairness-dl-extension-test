@@ -104,7 +104,8 @@ class QIDAnalyzer:
                 x_cf = x_cf.to(self.device).unsqueeze(0)
                 logits = self.model(x_cf)
                 # Ensure logits has shape (batch_size, num_classes)
-                if logits.dim() == 1:
+                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
+                while logits.dim() < 2:
                     logits = logits.unsqueeze(0)
                 probs = F.softmax(logits, dim=1)[0]
                 predictions.append(probs.cpu().numpy())
@@ -157,7 +158,8 @@ class QIDAnalyzer:
                 x_cf = x_cf.to(self.device).unsqueeze(0)
                 logits = self.model(x_cf)
                 # Ensure logits has shape (batch_size, num_classes)
-                if logits.dim() == 1:
+                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
+                while logits.dim() < 2:
                     logits = logits.unsqueeze(0)
                 probs = F.softmax(logits, dim=1)[0]
 

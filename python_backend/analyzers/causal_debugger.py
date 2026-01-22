@@ -50,8 +50,9 @@ class CausalDebugger:
 
                 # Get activations at this layer
                 activations = self.model.get_layer_output(x.unsqueeze(0), layer_idx)
-                # Ensure activations has proper shape
-                if activations.dim() == 1:
+                # Ensure activations has proper shape (batch_size, features)
+                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
+                while activations.dim() < 2:
                     activations = activations.unsqueeze(0)
 
                 # Compute gradient of activations w.r.t. input
@@ -104,7 +105,8 @@ class CausalDebugger:
                 # Get activations at this layer
                 activations = self.model.get_layer_output(x.unsqueeze(0), layer_idx)
                 # Ensure activations has batch dimension before indexing
-                if activations.dim() == 1:
+                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
+                while activations.dim() < 2:
                     activations = activations.unsqueeze(0)
                 activations = activations[0]
 
