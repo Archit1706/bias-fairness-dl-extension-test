@@ -35,6 +35,38 @@ class DiscriminatoryInstanceSearch:
         self.protected_indices = protected_indices
         self.device = device
 
+    def _safe_get_probs(self, x_input: torch.Tensor) -> torch.Tensor:
+        """
+        Safely get probability predictions from model, handling all tensor shape edge cases.
+
+        Args:
+            x_input: Input tensor (should be 2D with batch dimension)
+
+        Returns:
+            1D probability tensor of shape (num_classes,)
+        """
+        output = self.model(x_input)
+
+        # Handle 0-dim tensor (scalar)
+        if output.dim() == 0:
+            output = output.unsqueeze(0).unsqueeze(0)
+        # Handle 1-dim tensor
+        elif output.dim() == 1:
+            output = output.unsqueeze(0)
+
+        # Apply softmax
+        probs = F.softmax(output, dim=1)
+
+        # Get first sample, flattening to ensure 1D
+        probs = probs[0].flatten()
+
+        # Ensure we have at least 2 classes for binary classification
+        if probs.numel() == 1:
+            p1 = probs[0]
+            probs = torch.stack([1 - p1, p1])
+
+        return probs
+
     def global_search(
         self,
         x_init: torch.Tensor,
@@ -74,13 +106,8 @@ class DiscriminatoryInstanceSearch:
                         else:
                             x_cf[idx] = val
 
-                output = self.model(x_cf.unsqueeze(0))
-                # Ensure output has shape (batch_size, num_classes)
-                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
-                while output.dim() < 2:
-                    output = output.unsqueeze(0)
-                probs = F.softmax(output, dim=1)
-                counterfactual_outputs.append(probs[0])
+                probs = self._safe_get_probs(x_cf.unsqueeze(0))
+                counterfactual_outputs.append(probs)
 
             # Stack outputs
             outputs_tensor = torch.stack(counterfactual_outputs)
