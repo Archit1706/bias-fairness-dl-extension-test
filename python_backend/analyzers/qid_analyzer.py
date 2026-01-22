@@ -30,6 +30,39 @@ class QIDAnalyzer:
         self.protected_indices = protected_indices
         self.device = device
 
+    def _safe_get_probs(self, x_input: torch.Tensor) -> torch.Tensor:
+        """
+        Safely get probability predictions from model, handling all tensor shape edge cases.
+
+        Args:
+            x_input: Input tensor (should be 2D with batch dimension)
+
+        Returns:
+            1D probability tensor of shape (num_classes,)
+        """
+        logits = self.model(x_input)
+
+        # Handle 0-dim tensor (scalar) - shouldn't happen but be safe
+        if logits.dim() == 0:
+            logits = logits.unsqueeze(0).unsqueeze(0)  # (1, 1)
+        # Handle 1-dim tensor
+        elif logits.dim() == 1:
+            logits = logits.unsqueeze(0)  # (1, n)
+
+        # Apply softmax
+        probs = F.softmax(logits, dim=1)
+
+        # Get first sample, flattening to ensure 1D
+        probs = probs[0].flatten()
+
+        # Ensure we have at least 2 classes for binary classification
+        if probs.numel() == 1:
+            # If only 1 output, treat as probability of class 1, compute class 0
+            p1 = probs[0]
+            probs = torch.stack([1 - p1, p1])
+
+        return probs
+
     def generate_counterfactuals(
         self, x_base: torch.Tensor, protected_values: List
     ) -> List[torch.Tensor]:
@@ -102,12 +135,7 @@ class QIDAnalyzer:
         with torch.no_grad():
             for x_cf in counterfactuals:
                 x_cf = x_cf.to(self.device).unsqueeze(0)
-                logits = self.model(x_cf)
-                # Ensure logits has shape (batch_size, num_classes)
-                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
-                while logits.dim() < 2:
-                    logits = logits.unsqueeze(0)
-                probs = F.softmax(logits, dim=1)[0]
+                probs = self._safe_get_probs(x_cf)
                 predictions.append(probs.cpu().numpy())
 
         predictions = np.array(predictions)
@@ -156,18 +184,14 @@ class QIDAnalyzer:
         with torch.no_grad():
             for x_cf in counterfactuals:
                 x_cf = x_cf.to(self.device).unsqueeze(0)
-                logits = self.model(x_cf)
-                # Ensure logits has shape (batch_size, num_classes)
-                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
-                while logits.dim() < 2:
-                    logits = logits.unsqueeze(0)
-                probs = F.softmax(logits, dim=1)[0]
+                probs = self._safe_get_probs(x_cf)
 
                 max_prob = probs.max().item()
                 max_probs.append(max_prob)
 
-                # Assume class 1 is "favorable" outcome
-                favorable_outcomes.append(probs[1].item())
+                # Assume class 1 is "favorable" outcome (safe access with fallback)
+                favorable_prob = probs[1].item() if probs.numel() > 1 else probs[0].item()
+                favorable_outcomes.append(favorable_prob)
 
         # Min entropy = -log(max P(y|x))
         min_entropy = -np.log(max(max_probs)) if max(max_probs) > 0 else 0
