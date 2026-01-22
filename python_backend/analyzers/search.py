@@ -76,7 +76,8 @@ class DiscriminatoryInstanceSearch:
 
                 output = self.model(x_cf.unsqueeze(0))
                 # Ensure output has shape (batch_size, num_classes)
-                if output.dim() == 1:
+                # Handle 0-dim (scalar), 1-dim, and 2-dim tensors
+                while output.dim() < 2:
                     output = output.unsqueeze(0)
                 probs = F.softmax(output, dim=1)
                 counterfactual_outputs.append(probs[0])
