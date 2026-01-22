@@ -142,6 +142,21 @@ async function analyzeDataset(uri: vscode.Uri) {
                     },
                 );
 
+                // Step 4: Causal debugging
+                progress.report({ increment: 85, message: 'Localizing biased layers and neurons...' });
+
+                const debugResponse = await axios.post(
+                    `http://localhost:${SERVER_PORT}/debug`,
+                    {
+                        protected_values: protectedValues,
+                        num_iterations: 50,
+                        num_neighbors: 30,
+                    },
+                    {
+                        timeout: 120000,
+                    },
+                );
+
                 progress.report({ increment: 100, message: 'Complete!' });
 
                 // Show results
@@ -149,6 +164,7 @@ async function analyzeDataset(uri: vscode.Uri) {
                     training: trainResponse.data,
                     analysis: analyzeResponse.data,
                     search: searchResponse.data,
+                    debug: debugResponse.data,
                 });
             } catch (error: any) {
                 console.error('Analysis error:', error);
@@ -176,6 +192,8 @@ function showResults(results: any) {
 function getWebviewHtml(results: any): string {
     const qidMetrics = results.analysis.qid_metrics;
     const searchResults = results.search.search_results;
+    const layerAnalysis = results.debug?.layer_analysis;
+    const neuronAnalysis = results.debug?.neuron_analysis;
 
     return `
 <!DOCTYPE html>
@@ -264,18 +282,49 @@ function getWebviewHtml(results: any): string {
     </div>
     
     <div id="qid-chart"></div>
-    
+
+    ${
+        layerAnalysis
+            ? `
+    <h2>🧠 Causal Debugging: Layer Analysis</h2>
+    <div class="metric ${layerAnalysis.biased_layer.sensitivity > 0.5 ? 'warning' : ''}">
+        <span class="metric-label">Most Biased Layer:</span>
+        <span class="metric-value">${layerAnalysis.biased_layer.layer_name} (${layerAnalysis.biased_layer.neuron_count} neurons)</span>
+        <br><small>Sensitivity: ${layerAnalysis.biased_layer.sensitivity.toFixed(4)}</small>
+    </div>
+
+    <div id="layer-chart"></div>
+
+    <h2>⚡ Neuron-Level Localization</h2>
+    <div class="metric">
+        <span class="metric-label">Top Biased Neurons:</span>
+        <br>
+        ${neuronAnalysis
+            .map(
+                (n: any, idx: number) =>
+                    `<div style="margin: 5px 0; padding: 5px; background: #2d2d30;">
+                        #${idx + 1}: Neuron ${n.neuron_idx} - Impact: ${n.impact_score.toFixed(4)}
+                    </div>`,
+            )
+            .join('')}
+    </div>
+
+    <div id="neuron-chart"></div>
+    `
+            : ''
+    }
+
     <script>
         const instances = ${JSON.stringify(searchResults.discriminatory_instances)};
-        
+
         if (instances.length > 0) {
             const trace = {
                 x: instances.map((_, i) => i + 1),
                 y: instances.map(inst => inst.qid),
                 type: 'scatter',
                 mode: 'markers',
-                marker: { 
-                    size: 10, 
+                marker: {
+                    size: 10,
                     color: instances.map(inst => inst.qid),
                     colorscale: 'Reds',
                     showscale: true,
@@ -286,7 +335,7 @@ function getWebviewHtml(results: any): string {
                 text: instances.map(inst => \`QID: \${inst.qid.toFixed(4)} bits<br>Variance: \${inst.variance.toFixed(4)}\`),
                 hoverinfo: 'text'
             };
-            
+
             const layout = {
                 title: 'QID Distribution of Discriminatory Instances',
                 xaxis: { title: 'Instance Index' },
@@ -295,8 +344,61 @@ function getWebviewHtml(results: any): string {
                 paper_bgcolor: '#1e1e1e',
                 font: { color: '#d4d4d4' }
             };
-            
+
             Plotly.newPlot('qid-chart', [trace], layout);
+        }
+
+        // Layer sensitivity chart
+        const layerData = ${JSON.stringify(layerAnalysis?.all_layers || [])};
+        if (layerData.length > 0) {
+            const layerTrace = {
+                x: layerData.map(l => l.layer_name),
+                y: layerData.map(l => l.sensitivity),
+                type: 'bar',
+                marker: {
+                    color: layerData.map(l => l.sensitivity),
+                    colorscale: 'Viridis',
+                    showscale: true,
+                    colorbar: {
+                        title: 'Sensitivity'
+                    }
+                }
+            };
+
+            const layerLayout = {
+                title: 'Layer-Wise Bias Sensitivity',
+                xaxis: { title: 'Layer' },
+                yaxis: { title: 'Sensitivity Score' },
+                plot_bgcolor: '#1e1e1e',
+                paper_bgcolor: '#1e1e1e',
+                font: { color: '#d4d4d4' }
+            };
+
+            Plotly.newPlot('layer-chart', [layerTrace], layerLayout);
+        }
+
+        // Neuron impact chart
+        const neuronData = ${JSON.stringify(neuronAnalysis || [])};
+        if (neuronData.length > 0) {
+            const neuronTrace = {
+                x: neuronData.map(n => 'N' + n.neuron_idx),
+                y: neuronData.map(n => n.impact_score),
+                type: 'bar',
+                marker: {
+                    color: '#ef5350'
+                }
+            };
+
+            const neuronLayout = {
+                title: 'Top Biased Neurons (Impact Score)',
+                xaxis: { title: 'Neuron' },
+                yaxis: { title: 'Impact Score' },
+                plot_bgcolor: '#1e1e1e',
+                paper_bgcolor: '#1e1e1e',
+                font: { color: '#d4d4d4' }
+            };
+
+            Plotly.newPlot('neuron-chart', [neuronTrace], neuronLayout);
         }
     </script>
     

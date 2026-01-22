@@ -17,6 +17,16 @@ class CausalDebugger:
         self.model.eval()
         self.device = device
 
+        # Build layers list from model
+        self.layers = [
+            self.model.layer1,
+            self.model.layer2,
+            self.model.layer3,
+            self.model.layer4,
+            self.model.layer5,
+            self.model.output_layer
+        ]
+
     def localize_biased_layer(
         self, discriminatory_instances: List[Dict], accuracy_threshold: float = 0.05
     ) -> Dict:
@@ -25,7 +35,7 @@ class CausalDebugger:
 
         Uses gradient-based sensitivity analysis.
         """
-        num_layers = len(self.model.layers)
+        num_layers = len(self.layers)
         layer_sensitivities = []
 
         for layer_idx in range(num_layers):
@@ -61,7 +71,7 @@ class CausalDebugger:
                     "layer_idx": layer_idx,
                     "layer_name": f"Layer {layer_idx + 1}",
                     "sensitivity": avg_sensitivity,
-                    "neuron_count": self.model.layers[layer_idx].out_features,
+                    "neuron_count": self.layers[layer_idx].out_features,
                 }
             )
 
@@ -76,7 +86,7 @@ class CausalDebugger:
         """
         Identify specific neurons encoding protected information.
         """
-        layer = self.model.layers[layer_idx]
+        layer = self.layers[layer_idx]
         num_neurons = layer.out_features
 
         neuron_impacts = np.zeros(num_neurons)
