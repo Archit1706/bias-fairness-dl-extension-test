@@ -1,12 +1,21 @@
 // src/extension.ts
 import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import * as path from 'path';
 import * as fs from 'fs';
 
 let serverProcess: ChildProcess | null = null;
 const SERVER_PORT = 8765;
+const SERVER_URL = `http://localhost:${SERVER_PORT}`;
+
+// Error message mappings for user-friendly messages
+const ERROR_MESSAGES: Record<string, string> = {
+    'ECONNREFUSED': 'Cannot connect to the analysis server. Please wait for it to start or restart VS Code.',
+    'ETIMEDOUT': 'The analysis is taking longer than expected. This may happen with large datasets.',
+    'ENOTFOUND': 'Network error. Please check your connection.',
+    'Train model first': 'Please run training first before performing analysis.',
+};
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Fairness DL Extension activating...');
@@ -44,15 +53,173 @@ async function startBackend(context: vscode.ExtensionContext) {
         console.error(`Backend Error: ${data}`);
     });
 
-    // Wait for server to start
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Show startup progress
+    await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Starting Fairness Analysis Server...',
+            cancellable: false,
+        },
+        async (progress) => {
+            progress.report({ message: 'Initializing Python backend...' });
 
-    // Verify server is running
+            // Wait for server to start with retries
+            let attempts = 0;
+            const maxAttempts = 10;
+
+            while (attempts < maxAttempts) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                attempts++;
+
+                progress.report({
+                    message: `Connecting to server (attempt ${attempts}/${maxAttempts})...`,
+                    increment: 10,
+                });
+
+                try {
+                    await axios.get(`${SERVER_URL}/`, { timeout: 2000 });
+                    vscode.window.showInformationMessage('Fairness Analysis Server is ready!');
+                    return;
+                } catch {
+                    // Continue trying
+                }
+            }
+
+            showError(
+                'Server Startup Failed',
+                'The backend server failed to start. Please check:\n' +
+                    '1. Python 3.8+ is installed\n' +
+                    '2. Required packages are installed (pip install -r requirements.txt)\n' +
+                    '3. Port 8765 is not in use',
+            );
+        },
+    );
+}
+
+/**
+ * Show a user-friendly error message with optional details
+ */
+function showError(title: string, detail: string, actions?: { label: string; action: () => void }[]) {
+    const message = `${title}: ${detail}`;
+
+    if (actions && actions.length > 0) {
+        const actionLabels = actions.map((a) => a.label);
+        vscode.window.showErrorMessage(message, ...actionLabels).then((selected) => {
+            const action = actions.find((a) => a.label === selected);
+            if (action) {
+                action.action();
+            }
+        });
+    } else {
+        vscode.window.showErrorMessage(message);
+    }
+}
+
+/**
+ * Parse error and return user-friendly message
+ */
+function parseError(error: any): { title: string; detail: string; suggestion: string } {
+    if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+
+        // Network errors
+        if (axiosError.code) {
+            const friendlyMessage = ERROR_MESSAGES[axiosError.code];
+            if (friendlyMessage) {
+                return {
+                    title: 'Connection Error',
+                    detail: friendlyMessage,
+                    suggestion: 'Try restarting VS Code or checking if the server is running.',
+                };
+            }
+        }
+
+        // HTTP errors
+        if (axiosError.response) {
+            const status = axiosError.response.status;
+            const data = axiosError.response.data as any;
+            const detail = data?.detail || axiosError.message;
+
+            switch (status) {
+                case 400:
+                    return {
+                        title: 'Invalid Request',
+                        detail: detail,
+                        suggestion: 'Please check your input and try again.',
+                    };
+                case 404:
+                    return {
+                        title: 'Not Found',
+                        detail: detail,
+                        suggestion: 'The requested file or resource was not found.',
+                    };
+                case 500:
+                    // Parse common backend errors
+                    if (detail.includes('label_column')) {
+                        return {
+                            title: 'Invalid Column',
+                            detail: 'The specified label column was not found in the dataset.',
+                            suggestion: 'Please select a valid column from the dropdown.',
+                        };
+                    }
+                    if (detail.includes('memory')) {
+                        return {
+                            title: 'Memory Error',
+                            detail: 'The dataset is too large to process.',
+                            suggestion: 'Try using a smaller dataset or increasing available memory.',
+                        };
+                    }
+                    return {
+                        title: 'Analysis Error',
+                        detail: detail,
+                        suggestion: 'Check the console for more details.',
+                    };
+                default:
+                    return {
+                        title: `Server Error (${status})`,
+                        detail: detail,
+                        suggestion: 'An unexpected error occurred.',
+                    };
+            }
+        }
+
+        // Timeout
+        if (axiosError.code === 'ECONNABORTED') {
+            return {
+                title: 'Timeout',
+                detail: 'The operation took too long to complete.',
+                suggestion: 'Try with a smaller dataset or fewer epochs.',
+            };
+        }
+    }
+
+    // Generic error
+    return {
+        title: 'Error',
+        detail: error.message || 'An unknown error occurred.',
+        suggestion: 'Please try again or check the console for details.',
+    };
+}
+
+/**
+ * Fetch column names from CSV file
+ */
+async function fetchColumns(filePath: string): Promise<{ columns: string[]; sampleData: any[] } | null> {
     try {
-        const response = await axios.get(`http://localhost:${SERVER_PORT}/`);
-        vscode.window.showInformationMessage('✅ Fairness backend started successfully');
+        const response = await axios.post(
+            `${SERVER_URL}/columns`,
+            { file_path: filePath },
+            { timeout: 10000 },
+        );
+
+        return {
+            columns: response.data.columns,
+            sampleData: response.data.sample_data,
+        };
     } catch (error) {
-        vscode.window.showErrorMessage('❌ Failed to start backend. Check Python environment.');
+        const parsed = parseError(error);
+        showError(parsed.title, `${parsed.detail}\n${parsed.suggestion}`);
+        return null;
     }
 }
 
@@ -61,60 +228,119 @@ async function analyzeDataset(uri: vscode.Uri) {
 
     // Verify it's a CSV
     if (!filePath.endsWith('.csv')) {
-        vscode.window.showErrorMessage('Please select a CSV file');
+        showError(
+            'Invalid File Type',
+            'Please select a CSV file (.csv extension required).',
+        );
         return;
     }
 
-    // Ask user for label column
-    const labelColumn = await vscode.window.showInputBox({
-        prompt: 'Enter the name of the label/target column',
-        placeHolder: 'e.g., income, label, target',
-    });
-
-    if (!labelColumn) {
+    // Verify file exists
+    if (!fs.existsSync(filePath)) {
+        showError('File Not Found', `The file "${path.basename(filePath)}" does not exist.`);
         return;
     }
+
+    // Fetch column names with progress
+    let columnData: { columns: string[]; sampleData: any[] } | null = null;
 
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'Analyzing dataset for fairness...',
+            title: 'Loading CSV columns...',
+            cancellable: false,
+        },
+        async () => {
+            columnData = await fetchColumns(filePath);
+        },
+    );
+
+    if (!columnData || (columnData as { columns: string[]; sampleData: any[] }).columns.length === 0) {
+        showError('Empty Dataset', 'The CSV file appears to be empty or has no columns.');
+        return;
+    }
+
+    // Cast to proper type after null check
+    const validColumnData = columnData as { columns: string[]; sampleData: any[] };
+
+    // Create QuickPick items with column info
+    const quickPickItems: vscode.QuickPickItem[] = validColumnData.columns.map((col: string, index: number) => {
+        // Get sample value from first row if available
+        const sampleValue = validColumnData.sampleData[0]?.[col];
+        const sampleStr = sampleValue !== undefined ? ` (e.g., "${sampleValue}")` : '';
+
+        return {
+            label: col,
+            description: `Column ${index + 1}${sampleStr}`,
+            detail: `Select this column as the target/label variable`,
+        };
+    });
+
+    // Show QuickPick for column selection
+    const selectedColumn = await vscode.window.showQuickPick(quickPickItems, {
+        placeHolder: 'Select the target/label column for prediction',
+        title: 'Fairness Analysis: Select Label Column',
+        matchOnDescription: true,
+        matchOnDetail: false,
+    });
+
+    if (!selectedColumn) {
+        return; // User cancelled
+    }
+
+    const labelColumn = selectedColumn.label;
+
+    // Run the analysis with improved progress
+    await runAnalysis(filePath, labelColumn);
+}
+
+async function runAnalysis(filePath: string, labelColumn: string) {
+    await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Fairness Analysis',
             cancellable: false,
         },
         async (progress) => {
+            const startTime = Date.now();
+
             try {
-                // Step 1: Train model
-                progress.report({ increment: 0, message: 'Training DNN (this may take 2-3 minutes)...' });
+                // Step 1: Train model (0-40%)
+                progress.report({
+                    increment: 0,
+                    message: 'Step 1/4: Training neural network model...',
+                });
 
                 const trainResponse = await axios.post(
-                    `http://localhost:${SERVER_PORT}/train`,
+                    `${SERVER_URL}/train`,
                     {
                         file_path: filePath,
                         label_column: labelColumn,
                         num_epochs: 30,
                     },
-                    {
-                        timeout: 300000, // 5 minute timeout
-                    },
+                    { timeout: 300000 },
                 );
 
-                vscode.window.showInformationMessage(
-                    `✅ Model trained: ${trainResponse.data.accuracy.toFixed(2)}% accuracy`,
-                );
+                const trainTime = Math.round((Date.now() - startTime) / 1000);
+                progress.report({
+                    increment: 40,
+                    message: `Step 1/4: Training complete (${trainTime}s) - ${trainResponse.data.accuracy.toFixed(1)}% accuracy`,
+                });
 
-                // Step 2: Analyze
-                progress.report({ increment: 40, message: 'Computing QID metrics...' });
+                // Step 2: Analyze (40-65%)
+                progress.report({
+                    increment: 0,
+                    message: 'Step 2/4: Computing fairness metrics (QID analysis)...',
+                });
 
                 const protectedFeatures = trainResponse.data.protected_features;
-
-                // Create protected values dict (assume binary for now)
-                const protectedValues: any = {};
+                const protectedValues: Record<string, number[]> = {};
                 protectedFeatures.forEach((_feature: string, idx: number) => {
                     protectedValues[idx.toString()] = [0.0, 1.0];
                 });
 
                 const analyzeResponse = await axios.post(
-                    `http://localhost:${SERVER_PORT}/analyze`,
+                    `${SERVER_URL}/analyze`,
                     {
                         file_path: filePath,
                         label_column: labelColumn,
@@ -122,42 +348,59 @@ async function analyzeDataset(uri: vscode.Uri) {
                         protected_values: protectedValues,
                         max_samples: 500,
                     },
-                    {
-                        timeout: 120000, // 2 minute timeout
-                    },
+                    { timeout: 120000 },
                 );
 
-                // Step 3: Search for discriminatory instances
-                progress.report({ increment: 70, message: 'Searching for discriminatory instances...' });
+                progress.report({
+                    increment: 25,
+                    message: `Step 2/4: QID metrics computed - Mean QID: ${analyzeResponse.data.qid_metrics.mean_qid.toFixed(4)} bits`,
+                });
+
+                // Step 3: Search (65-85%)
+                progress.report({
+                    increment: 0,
+                    message: 'Step 3/4: Searching for discriminatory instances...',
+                });
 
                 const searchResponse = await axios.post(
-                    `http://localhost:${SERVER_PORT}/search`,
+                    `${SERVER_URL}/search`,
                     {
                         protected_values: protectedValues,
                         num_iterations: 50,
                         num_neighbors: 30,
                     },
-                    {
-                        timeout: 120000,
-                    },
+                    { timeout: 120000 },
                 );
 
-                // Step 4: Causal debugging
-                progress.report({ increment: 85, message: 'Localizing biased layers and neurons...' });
+                progress.report({
+                    increment: 20,
+                    message: `Step 3/4: Found ${searchResponse.data.search_results.num_found} discriminatory instances`,
+                });
+
+                // Step 4: Debug (85-100%)
+                progress.report({
+                    increment: 0,
+                    message: 'Step 4/4: Localizing biased layers and neurons...',
+                });
 
                 const debugResponse = await axios.post(
-                    `http://localhost:${SERVER_PORT}/debug`,
+                    `${SERVER_URL}/debug`,
                     {
                         protected_values: protectedValues,
                         num_iterations: 50,
                         num_neighbors: 30,
                     },
-                    {
-                        timeout: 120000,
-                    },
+                    { timeout: 120000 },
                 );
 
-                progress.report({ increment: 100, message: 'Complete!' });
+                const totalTime = Math.round((Date.now() - startTime) / 1000);
+                progress.report({
+                    increment: 15,
+                    message: `Analysis complete! Total time: ${totalTime}s`,
+                });
+
+                // Brief pause to show completion
+                await new Promise((resolve) => setTimeout(resolve, 500));
 
                 // Show results
                 showResults({
@@ -165,14 +408,20 @@ async function analyzeDataset(uri: vscode.Uri) {
                     analysis: analyzeResponse.data,
                     search: searchResponse.data,
                     debug: debugResponse.data,
+                    metadata: {
+                        file: path.basename(filePath),
+                        labelColumn: labelColumn,
+                        totalTime: totalTime,
+                    },
                 });
+
+                vscode.window.showInformationMessage(
+                    `Fairness analysis complete! Found ${analyzeResponse.data.qid_metrics.num_discriminatory} potentially discriminatory instances.`,
+                );
             } catch (error: any) {
                 console.error('Analysis error:', error);
-                vscode.window.showErrorMessage(`Error: ${error.message}`);
-
-                if (error.response) {
-                    vscode.window.showErrorMessage(`Server error: ${JSON.stringify(error.response.data)}`);
-                }
+                const parsed = parseError(error);
+                showError(parsed.title, `${parsed.detail}\n\nSuggestion: ${parsed.suggestion}`);
             }
         },
     );
@@ -194,129 +443,659 @@ function getWebviewHtml(results: any): string {
     const searchResults = results.search.search_results;
     const layerAnalysis = results.debug?.layer_analysis;
     const neuronAnalysis = results.debug?.neuron_analysis;
+    const metadata = results.metadata;
+
+    // Determine overall fairness status
+    const fairnessScore = calculateFairnessScore(qidMetrics);
+    const fairnessStatus = getFairnessStatus(fairnessScore);
 
     return `
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            padding: 20px; 
-            background-color: #1e1e1e;
-            color: #d4d4d4;
+        :root {
+            --bg-primary: #1e1e1e;
+            --bg-secondary: #252526;
+            --bg-tertiary: #2d2d30;
+            --bg-hover: #3c3c3c;
+            --text-primary: #e4e4e4;
+            --text-secondary: #a0a0a0;
+            --text-muted: #6e6e6e;
+            --accent-blue: #4fc3f7;
+            --accent-green: #4caf50;
+            --accent-yellow: #ffc107;
+            --accent-orange: #ff9800;
+            --accent-red: #f44336;
+            --accent-purple: #9c27b0;
+            --border-color: #3c3c3c;
+            --shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            --transition: all 0.2s ease;
         }
-        h1 { color: #4fc3f7; border-bottom: 2px solid #4fc3f7; padding-bottom: 10px; }
-        h2 { color: #81c784; margin-top: 30px; }
-        .metric { 
-            margin: 15px 0; 
-            padding: 10px;
-            background-color: #252526;
-            border-left: 3px solid #4fc3f7;
-            border-radius: 4px;
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
-        .metric-label { font-weight: bold; color: #4fc3f7; }
-        .metric-value { font-size: 1.2em; margin-left: 10px; }
-        .warning { background-color: #332b00; border-left-color: #ffa726; }
-        .error { background-color: #330000; border-left-color: #ef5350; }
-        .success { background-color: #003300; border-left-color: #66bb6a; }
-        #qid-chart { margin-top: 20px; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 32px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .header-left h1 {
+            font-size: 28px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .header-meta {
+            display: flex;
+            gap: 24px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .header-meta span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* Overall Score Card */
+        .score-card {
+            background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+            min-width: 200px;
+            border: 1px solid var(--border-color);
+        }
+
+        .score-value {
+            font-size: 48px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .score-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .score-status {
+            margin-top: 12px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .status-good { background: rgba(76, 175, 80, 0.2); color: var(--accent-green); }
+        .status-warning { background: rgba(255, 152, 0, 0.2); color: var(--accent-orange); }
+        .status-danger { background: rgba(244, 67, 54, 0.2); color: var(--accent-red); }
+
+        /* Section */
+        .section {
+            margin-bottom: 32px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .section-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Cards Grid */
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+        }
+
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            transition: var(--transition);
+        }
+
+        .card:hover {
+            background: var(--bg-tertiary);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+
+        .card-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .card-badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-success { background: rgba(76, 175, 80, 0.2); color: var(--accent-green); }
+        .badge-warning { background: rgba(255, 152, 0, 0.2); color: var(--accent-orange); }
+        .badge-danger { background: rgba(244, 67, 54, 0.2); color: var(--accent-red); }
+        .badge-info { background: rgba(79, 195, 247, 0.2); color: var(--accent-blue); }
+
+        .card-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .card-unit {
+            font-size: 16px;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-left: 4px;
+        }
+
+        .card-description {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            margin-top: 12px;
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: var(--bg-primary);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-labels {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 4px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* Chart Container */
+        .chart-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 16px;
+        }
+
+        .chart-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: var(--text-primary);
+        }
+
+        /* Neuron List */
+        .neuron-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .neuron-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            transition: var(--transition);
+        }
+
+        .neuron-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .neuron-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .neuron-rank {
+            width: 28px;
+            height: 28px;
+            background: var(--accent-blue);
+            color: var(--bg-primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .neuron-name {
+            font-weight: 500;
+        }
+
+        .neuron-score {
+            font-weight: 600;
+            color: var(--accent-orange);
+        }
+
+        /* Interpretation Box */
+        .interpretation-box {
+            background: linear-gradient(135deg, rgba(79, 195, 247, 0.1) 0%, rgba(156, 39, 176, 0.1) 100%);
+            border: 1px solid rgba(79, 195, 247, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 16px;
+        }
+
+        .interpretation-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--accent-blue);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .interpretation-content {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.7;
+        }
+
+        .interpretation-content strong {
+            color: var(--text-primary);
+        }
+
+        /* Legal Compliance Box */
+        .compliance-box {
+            padding: 16px 20px;
+            border-radius: 12px;
+            margin-top: 16px;
+        }
+
+        .compliance-pass {
+            background: rgba(76, 175, 80, 0.1);
+            border: 1px solid rgba(76, 175, 80, 0.3);
+        }
+
+        .compliance-fail {
+            background: rgba(244, 67, 54, 0.1);
+            border: 1px solid rgba(244, 67, 54, 0.3);
+        }
+
+        .compliance-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .compliance-pass .compliance-header { color: var(--accent-green); }
+        .compliance-fail .compliance-header { color: var(--accent-red); }
+
+        .compliance-text {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .section {
+            animation: fadeIn 0.4s ease forwards;
+        }
+
+        .section:nth-child(2) { animation-delay: 0.1s; }
+        .section:nth-child(3) { animation-delay: 0.2s; }
+        .section:nth-child(4) { animation-delay: 0.3s; }
+        .section:nth-child(5) { animation-delay: 0.4s; }
     </style>
 </head>
 <body>
-    <h1>🔍 Fairness Analysis Results</h1>
-    
-    <h2>📊 Model Training</h2>
-    <div class="metric success">
-        <span class="metric-label">Accuracy:</span>
-        <span class="metric-value">${results.training.accuracy.toFixed(2)}%</span>
-    </div>
-    <div class="metric">
-        <span class="metric-label">Protected Features:</span>
-        <span class="metric-value">${results.training.protected_features.join(', ')}</span>
-    </div>
-    <div class="metric">
-        <span class="metric-label">Model Parameters:</span>
-        <span class="metric-value">${results.training.num_parameters.toLocaleString()}</span>
-    </div>
-    
-    <h2>⚖️ QID Metrics (Information-Theoretic Fairness)</h2>
-    <div class="metric ${qidMetrics.mean_qid > 1.0 ? 'warning' : ''}">
-        <span class="metric-label">Mean QID:</span>
-        <span class="metric-value">${qidMetrics.mean_qid.toFixed(4)} bits</span>
-        <br><small>Average protected information used in decisions</small>
-    </div>
-    <div class="metric ${qidMetrics.max_qid > 2.0 ? 'error' : ''}">
-        <span class="metric-label">Max QID:</span>
-        <span class="metric-value">${qidMetrics.max_qid.toFixed(4)} bits</span>
-        <br><small>Worst-case protected information leakage</small>
-    </div>
-    <div class="metric ${qidMetrics.pct_discriminatory > 10 ? 'warning' : 'success'}">
-        <span class="metric-label">Discriminatory Instances:</span>
-        <span class="metric-value">${qidMetrics.num_discriminatory} (${qidMetrics.pct_discriminatory.toFixed(
-            1,
-        )}%)</span>
-        <br><small>Instances showing significant bias (QID > 0.1 bits)</small>
-    </div>
-    <div class="metric ${qidMetrics.mean_disparate_impact < 0.8 ? 'error' : 'success'}">
-        <span class="metric-label">Mean Disparate Impact Ratio:</span>
-        <span class="metric-value">${qidMetrics.mean_disparate_impact.toFixed(3)}</span>
-        ${
-            qidMetrics.mean_disparate_impact < 0.8
-                ? '<br><strong style="color: #ef5350;">⚠️ Violates 80% Rule (Legal Threshold)</strong>'
-                : '<br><span style="color: #66bb6a;">✅ Passes 80% Rule</span>'
-        }
-    </div>
-    
-    <h2>🔎 Discriminatory Instance Search</h2>
-    <div class="metric">
-        <span class="metric-label">Best QID Found:</span>
-        <span class="metric-value">${searchResults.best_qid.toFixed(4)} bits</span>
-        <br><small>Maximum discrimination discovered via gradient search</small>
-    </div>
-    <div class="metric">
-        <span class="metric-label">Instances Generated:</span>
-        <span class="metric-value">${searchResults.num_found}</span>
-        <br><small>Discriminatory test cases found in local search</small>
-    </div>
-    
-    <div id="qid-chart"></div>
-
-    ${
-        layerAnalysis
-            ? `
-    <h2>🧠 Causal Debugging: Layer Analysis</h2>
-    <div class="metric ${layerAnalysis.biased_layer.sensitivity > 0.5 ? 'warning' : ''}">
-        <span class="metric-label">Most Biased Layer:</span>
-        <span class="metric-value">${layerAnalysis.biased_layer.layer_name} (${layerAnalysis.biased_layer.neuron_count} neurons)</span>
-        <br><small>Sensitivity: ${layerAnalysis.biased_layer.sensitivity.toFixed(4)}</small>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-left">
+            <h1>Fairness Analysis Results</h1>
+            <div class="header-meta">
+                <span>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 0h8v1H4V0zM2 1h2v1H2V1zm10 0h2v1h-2V1zM1 2h1v1H1V2zm12 0h2v1h-2V2zM1 14h1v1H1v-1zm12 0h2v1h-2v-1zM2 14h2v1H2v-1zm10 0h2v1h-2v-1zM4 15h8v1H4v-1zM0 3h1v11H0V3zm15 0h1v11h-1V3z"/></svg>
+                    ${metadata?.file || 'Dataset'}
+                </span>
+                <span>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 14A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm-.5-9h1v4h-1V5zm0 5h1v1h-1v-1z"/></svg>
+                    Label: ${metadata?.labelColumn || 'N/A'}
+                </span>
+                <span>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 14A6 6 0 1 1 8 2a6 6 0 0 1 0 12zM7 4h2v5H7V4zm0 6h2v2H7v-2z"/></svg>
+                    ${metadata?.totalTime || 0}s analysis time
+                </span>
+            </div>
+        </div>
+        <div class="score-card">
+            <div class="score-value" style="color: ${fairnessStatus.color}">${fairnessScore}</div>
+            <div class="score-label">Fairness Score</div>
+            <div class="score-status ${fairnessStatus.class}">${fairnessStatus.label}</div>
+        </div>
     </div>
 
-    <div id="layer-chart"></div>
-
-    <h2>⚡ Neuron-Level Localization</h2>
-    <div class="metric">
-        <span class="metric-label">Top Biased Neurons:</span>
-        <br>
-        ${neuronAnalysis
-            .map(
-                (n: any, idx: number) =>
-                    `<div style="margin: 5px 0; padding: 5px; background: #2d2d30;">
-                        #${idx + 1}: Neuron ${n.neuron_idx} - Impact: ${n.impact_score.toFixed(4)}
-                    </div>`,
-            )
-            .join('')}
+    <!-- Model Training Section -->
+    <div class="section">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(76, 175, 80, 0.2);">
+                <span style="color: var(--accent-green);">📊</span>
+            </div>
+            <h2 class="section-title">Model Training</h2>
+        </div>
+        <div class="cards-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Model Accuracy</span>
+                    <span class="card-badge badge-success">Trained</span>
+                </div>
+                <div class="card-value">${results.training.accuracy.toFixed(1)}<span class="card-unit">%</span></div>
+                <div class="card-description">Test set classification accuracy</div>
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${results.training.accuracy}%; background: var(--accent-green);"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Protected Features</span>
+                    <span class="card-badge badge-info">Auto-detected</span>
+                </div>
+                <div class="card-value">${results.training.protected_features.length}</div>
+                <div class="card-description">${results.training.protected_features.join(', ')}</div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Model Size</span>
+                </div>
+                <div class="card-value">${(results.training.num_parameters / 1000).toFixed(1)}<span class="card-unit">K params</span></div>
+                <div class="card-description">Total trainable parameters</div>
+            </div>
+        </div>
     </div>
 
-    <div id="neuron-chart"></div>
-    `
-            : ''
-    }
+    <!-- QID Metrics Section -->
+    <div class="section">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(79, 195, 247, 0.2);">
+                <span style="color: var(--accent-blue);">⚖️</span>
+            </div>
+            <h2 class="section-title">Fairness Metrics (QID Analysis)</h2>
+        </div>
+        <div class="cards-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Mean QID</span>
+                    <span class="card-badge ${qidMetrics.mean_qid > 1.0 ? 'badge-warning' : 'badge-success'}">${qidMetrics.mean_qid > 1.0 ? 'High' : 'Low'}</span>
+                </div>
+                <div class="card-value">${qidMetrics.mean_qid.toFixed(4)}<span class="card-unit">bits</span></div>
+                <div class="card-description">Average protected information used in decisions. Lower is better.</div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Max QID</span>
+                    <span class="card-badge ${qidMetrics.max_qid > 2.0 ? 'badge-danger' : 'badge-success'}">${qidMetrics.max_qid > 2.0 ? 'Critical' : 'Normal'}</span>
+                </div>
+                <div class="card-value">${qidMetrics.max_qid.toFixed(4)}<span class="card-unit">bits</span></div>
+                <div class="card-description">Worst-case protected information leakage.</div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Discriminatory Instances</span>
+                    <span class="card-badge ${qidMetrics.pct_discriminatory > 10 ? 'badge-warning' : 'badge-success'}">${qidMetrics.pct_discriminatory > 10 ? 'Concerning' : 'Acceptable'}</span>
+                </div>
+                <div class="card-value">${qidMetrics.num_discriminatory}<span class="card-unit">(${qidMetrics.pct_discriminatory.toFixed(1)}%)</span></div>
+                <div class="card-description">Instances with QID > 0.1 bits showing potential bias.</div>
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${Math.min(qidMetrics.pct_discriminatory, 100)}%; background: ${qidMetrics.pct_discriminatory > 10 ? 'var(--accent-orange)' : 'var(--accent-green)'};"></div>
+                    </div>
+                    <div class="progress-labels">
+                        <span>0%</span>
+                        <span>10% threshold</span>
+                        <span>100%</span>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Disparate Impact Ratio</span>
+                    <span class="card-badge ${qidMetrics.mean_disparate_impact < 0.8 ? 'badge-danger' : 'badge-success'}">${qidMetrics.mean_disparate_impact < 0.8 ? 'Violation' : 'Compliant'}</span>
+                </div>
+                <div class="card-value">${qidMetrics.mean_disparate_impact.toFixed(3)}</div>
+                <div class="card-description">Ratio should be ≥ 0.8 for legal compliance.</div>
+                <div class="compliance-box ${qidMetrics.mean_disparate_impact >= 0.8 ? 'compliance-pass' : 'compliance-fail'}">
+                    <div class="compliance-header">
+                        ${qidMetrics.mean_disparate_impact >= 0.8 ? '✓ Passes 80% Rule' : '✗ Violates 80% Rule'}
+                    </div>
+                    <div class="compliance-text">
+                        ${qidMetrics.mean_disparate_impact >= 0.8
+                            ? 'Model meets legal fairness thresholds for hiring/lending decisions.'
+                            : 'Model may exhibit legally actionable discrimination. Consider retraining with fairness constraints.'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search Results Section -->
+    <div class="section">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(255, 152, 0, 0.2);">
+                <span style="color: var(--accent-orange);">🔎</span>
+            </div>
+            <h2 class="section-title">Discriminatory Instance Search</h2>
+        </div>
+        <div class="cards-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Best QID Found</span>
+                </div>
+                <div class="card-value">${searchResults.best_qid.toFixed(4)}<span class="card-unit">bits</span></div>
+                <div class="card-description">Maximum discrimination discovered via gradient search.</div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Instances Generated</span>
+                </div>
+                <div class="card-value">${searchResults.num_found}</div>
+                <div class="card-description">Discriminatory test cases found in local search.</div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">QID Distribution of Discriminatory Instances</div>
+            <div id="qid-chart" style="height: 350px;"></div>
+        </div>
+    </div>
+
+    ${layerAnalysis ? `
+    <!-- Layer Analysis Section -->
+    <div class="section">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(156, 39, 176, 0.2);">
+                <span style="color: var(--accent-purple);">🧠</span>
+            </div>
+            <h2 class="section-title">Causal Debugging: Layer Analysis</h2>
+        </div>
+        <div class="cards-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-label">Most Biased Layer</span>
+                    <span class="card-badge ${layerAnalysis.biased_layer.sensitivity > 0.5 ? 'badge-warning' : 'badge-info'}">
+                        ${layerAnalysis.biased_layer.sensitivity > 0.5 ? 'High Sensitivity' : 'Moderate'}
+                    </span>
+                </div>
+                <div class="card-value">${layerAnalysis.biased_layer.layer_name}</div>
+                <div class="card-description">
+                    Contains ${layerAnalysis.biased_layer.neuron_count} neurons with sensitivity score of ${layerAnalysis.biased_layer.sensitivity.toFixed(4)}
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Layer-Wise Bias Sensitivity</div>
+            <div id="layer-chart" style="height: 300px;"></div>
+        </div>
+    </div>
+
+    <!-- Neuron Analysis Section -->
+    <div class="section">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(244, 67, 54, 0.2);">
+                <span style="color: var(--accent-red);">⚡</span>
+            </div>
+            <h2 class="section-title">Neuron-Level Localization</h2>
+        </div>
+
+        <div class="cards-grid">
+            <div class="card" style="grid-column: span 2;">
+                <div class="card-header">
+                    <span class="card-label">Top Biased Neurons</span>
+                </div>
+                <div class="neuron-list">
+                    ${neuronAnalysis.map((n: any, idx: number) => `
+                        <div class="neuron-item">
+                            <div class="neuron-info">
+                                <div class="neuron-rank">${idx + 1}</div>
+                                <span class="neuron-name">Neuron ${n.neuron_idx}</span>
+                            </div>
+                            <span class="neuron-score">Impact: ${n.impact_score.toFixed(4)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Neuron Impact Scores</div>
+            <div id="neuron-chart" style="height: 300px;"></div>
+        </div>
+    </div>
+    ` : ''}
+
+    <!-- Interpretation Section -->
+    <div class="section">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(79, 195, 247, 0.2);">
+                <span style="color: var(--accent-blue);">💡</span>
+            </div>
+            <h2 class="section-title">Understanding the Results</h2>
+        </div>
+
+        <div class="interpretation-box">
+            <div class="interpretation-title">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11zM7 4h2v5H7V4zm0 6h2v2H7v-2z"/></svg>
+                What is QID (Quantitative Individual Discrimination)?
+            </div>
+            <div class="interpretation-content">
+                QID measures how many <strong>bits of protected information</strong> (e.g., gender, race, age) the model uses to make its predictions.
+                A value of <strong>0 bits</strong> means the model is perfectly fair and doesn't use any protected attributes.
+                <strong>Higher values indicate more bias</strong> - the model is learning to discriminate based on protected characteristics.
+            </div>
+        </div>
+
+        <div class="interpretation-box" style="margin-top: 16px;">
+            <div class="interpretation-title">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11zM7 4h2v5H7V4zm0 6h2v2H7v-2z"/></svg>
+                The 80% Rule (Four-Fifths Rule)
+            </div>
+            <div class="interpretation-content">
+                The <strong>disparate impact ratio</strong> should be ≥ <strong>0.8 (80%)</strong> to comply with legal standards in employment and lending.
+                This means the selection rate for a protected group should be at least 80% of the rate for the most favored group.
+                <strong>Values below 0.8 may indicate legally actionable discrimination</strong> and could expose your organization to regulatory scrutiny.
+            </div>
+        </div>
+    </div>
 
     <script>
-        const instances = ${JSON.stringify(searchResults.discriminatory_instances)};
+        // Chart styling
+        const chartLayout = {
+            plot_bgcolor: '#252526',
+            paper_bgcolor: '#252526',
+            font: { color: '#e4e4e4', family: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif' },
+            margin: { t: 20, r: 20, b: 50, l: 60 },
+            xaxis: { gridcolor: '#3c3c3c', zerolinecolor: '#3c3c3c' },
+            yaxis: { gridcolor: '#3c3c3c', zerolinecolor: '#3c3c3c' }
+        };
 
+        // QID Distribution Chart
+        const instances = ${JSON.stringify(searchResults.discriminatory_instances)};
         if (instances.length > 0) {
             const trace = {
                 x: instances.map((_, i) => i + 1),
@@ -326,29 +1105,29 @@ function getWebviewHtml(results: any): string {
                 marker: {
                     size: 10,
                     color: instances.map(inst => inst.qid),
-                    colorscale: 'Reds',
+                    colorscale: [
+                        [0, '#4caf50'],
+                        [0.5, '#ff9800'],
+                        [1, '#f44336']
+                    ],
                     showscale: true,
                     colorbar: {
-                        title: 'QID (bits)'
+                        title: { text: 'QID (bits)', font: { color: '#e4e4e4' } },
+                        tickfont: { color: '#a0a0a0' }
                     }
                 },
                 text: instances.map(inst => \`QID: \${inst.qid.toFixed(4)} bits<br>Variance: \${inst.variance.toFixed(4)}\`),
                 hoverinfo: 'text'
             };
 
-            const layout = {
-                title: 'QID Distribution of Discriminatory Instances',
-                xaxis: { title: 'Instance Index' },
-                yaxis: { title: 'QID (bits)' },
-                plot_bgcolor: '#1e1e1e',
-                paper_bgcolor: '#1e1e1e',
-                font: { color: '#d4d4d4' }
-            };
-
-            Plotly.newPlot('qid-chart', [trace], layout);
+            Plotly.newPlot('qid-chart', [trace], {
+                ...chartLayout,
+                xaxis: { ...chartLayout.xaxis, title: { text: 'Instance Index', font: { color: '#a0a0a0' } } },
+                yaxis: { ...chartLayout.yaxis, title: { text: 'QID (bits)', font: { color: '#a0a0a0' } } }
+            }, { responsive: true });
         }
 
-        // Layer sensitivity chart
+        // Layer Sensitivity Chart
         const layerData = ${JSON.stringify(layerAnalysis?.all_layers || [])};
         if (layerData.length > 0) {
             const layerTrace = {
@@ -357,27 +1136,24 @@ function getWebviewHtml(results: any): string {
                 type: 'bar',
                 marker: {
                     color: layerData.map(l => l.sensitivity),
-                    colorscale: 'Viridis',
-                    showscale: true,
-                    colorbar: {
-                        title: 'Sensitivity'
-                    }
-                }
+                    colorscale: [
+                        [0, '#4fc3f7'],
+                        [0.5, '#9c27b0'],
+                        [1, '#f44336']
+                    ],
+                    line: { width: 0 }
+                },
+                hovertemplate: '%{x}<br>Sensitivity: %{y:.4f}<extra></extra>'
             };
 
-            const layerLayout = {
-                title: 'Layer-Wise Bias Sensitivity',
-                xaxis: { title: 'Layer' },
-                yaxis: { title: 'Sensitivity Score' },
-                plot_bgcolor: '#1e1e1e',
-                paper_bgcolor: '#1e1e1e',
-                font: { color: '#d4d4d4' }
-            };
-
-            Plotly.newPlot('layer-chart', [layerTrace], layerLayout);
+            Plotly.newPlot('layer-chart', [layerTrace], {
+                ...chartLayout,
+                xaxis: { ...chartLayout.xaxis, title: { text: 'Layer', font: { color: '#a0a0a0' } } },
+                yaxis: { ...chartLayout.yaxis, title: { text: 'Sensitivity Score', font: { color: '#a0a0a0' } } }
+            }, { responsive: true });
         }
 
-        // Neuron impact chart
+        // Neuron Impact Chart
         const neuronData = ${JSON.stringify(neuronAnalysis || [])};
         if (neuronData.length > 0) {
             const neuronTrace = {
@@ -385,37 +1161,53 @@ function getWebviewHtml(results: any): string {
                 y: neuronData.map(n => n.impact_score),
                 type: 'bar',
                 marker: {
-                    color: '#ef5350'
-                }
+                    color: '#f44336',
+                    line: { width: 0 }
+                },
+                hovertemplate: 'Neuron %{x}<br>Impact: %{y:.4f}<extra></extra>'
             };
 
-            const neuronLayout = {
-                title: 'Top Biased Neurons (Impact Score)',
-                xaxis: { title: 'Neuron' },
-                yaxis: { title: 'Impact Score' },
-                plot_bgcolor: '#1e1e1e',
-                paper_bgcolor: '#1e1e1e',
-                font: { color: '#d4d4d4' }
-            };
-
-            Plotly.newPlot('neuron-chart', [neuronTrace], neuronLayout);
+            Plotly.newPlot('neuron-chart', [neuronTrace], {
+                ...chartLayout,
+                xaxis: { ...chartLayout.xaxis, title: { text: 'Neuron', font: { color: '#a0a0a0' } } },
+                yaxis: { ...chartLayout.yaxis, title: { text: 'Impact Score', font: { color: '#a0a0a0' } } }
+            }, { responsive: true });
         }
     </script>
-    
-    <h2>💡 Interpretation</h2>
-    <div class="metric">
-        <strong>What is QID?</strong><br>
-        Quantitative Individual Discrimination measures how many bits of protected information 
-        (e.g., gender, race) the model uses to make decisions. 0 bits = perfectly fair, higher = more bias.
-    </div>
-    <div class="metric">
-        <strong>80% Rule:</strong><br>
-        The disparate impact ratio should be ≥ 0.8 (80%) to comply with legal standards in hiring/lending.
-        Values below 0.8 may indicate legally actionable discrimination.
-    </div>
 </body>
 </html>
     `;
+}
+
+function calculateFairnessScore(qidMetrics: any): number {
+    // Calculate a 0-100 fairness score based on multiple metrics
+    let score = 100;
+
+    // Penalize for high mean QID (0-2 bits range maps to 0-30 penalty)
+    score -= Math.min(qidMetrics.mean_qid * 15, 30);
+
+    // Penalize for discriminatory instances (0-100% maps to 0-30 penalty)
+    score -= Math.min(qidMetrics.pct_discriminatory * 0.3, 30);
+
+    // Penalize for low disparate impact (0.8-1.0 is good, below 0.8 is bad)
+    if (qidMetrics.mean_disparate_impact < 0.8) {
+        score -= (0.8 - qidMetrics.mean_disparate_impact) * 50;
+    }
+
+    // Penalize for high max QID
+    score -= Math.min(qidMetrics.max_qid * 5, 20);
+
+    return Math.max(0, Math.round(score));
+}
+
+function getFairnessStatus(score: number): { label: string; class: string; color: string } {
+    if (score >= 80) {
+        return { label: 'Good', class: 'status-good', color: '#4caf50' };
+    } else if (score >= 60) {
+        return { label: 'Needs Review', class: 'status-warning', color: '#ff9800' };
+    } else {
+        return { label: 'Concerning', class: 'status-danger', color: '#f44336' };
+    }
 }
 
 export function deactivate() {

@@ -56,9 +56,73 @@ class SearchRequest(BaseModel):
     num_neighbors: int = 50
 
 
+class ColumnsRequest(BaseModel):
+    file_path: str
+
+
 @app.get("/")
 async def root():
     return {"message": "Fairness Analysis API", "status": "running"}
+
+
+@app.post("/columns")
+async def get_columns(request: ColumnsRequest):
+    """Get column names from a CSV file for dropdown selection."""
+    import pandas as pd
+
+    try:
+        # Validate file exists
+        if not os.path.exists(request.file_path):
+            raise HTTPException(
+                status_code=404,
+                detail=f"File not found: {request.file_path}"
+            )
+
+        # Validate file extension
+        if not request.file_path.lower().endswith('.csv'):
+            raise HTTPException(
+                status_code=400,
+                detail="Only CSV files are supported. Please select a .csv file."
+            )
+
+        # Read only header row for efficiency
+        df = pd.read_csv(request.file_path, nrows=0)
+        columns = df.columns.tolist()
+
+        if not columns:
+            raise HTTPException(
+                status_code=400,
+                detail="CSV file appears to be empty or has no column headers."
+            )
+
+        # Also get sample data for preview (first 3 rows)
+        df_sample = pd.read_csv(request.file_path, nrows=3)
+        sample_data = df_sample.to_dict('records')
+
+        return {
+            "status": "success",
+            "columns": columns,
+            "num_columns": len(columns),
+            "sample_data": sample_data
+        }
+
+    except pd.errors.EmptyDataError:
+        raise HTTPException(
+            status_code=400,
+            detail="CSV file is empty or cannot be parsed."
+        )
+    except pd.errors.ParserError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse CSV file: {str(e)}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error reading file: {str(e)}"
+        )
 
 
 @app.post("/train")
