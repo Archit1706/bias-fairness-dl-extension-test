@@ -72,65 +72,98 @@
     },
     "contributes": {
         "configuration": {
+            "title": "Fairness DL Debugger",
             "properties": {
-                "<pytool-module>.args": {
-                    "default": [],
-                    "description": "Arguments passed in. Each argument is a separate item in the array.",
-                    "items": {
-                        "type": "string"
-                    },
-                    "scope": "resource",
-                    "type": "array"
+                "fairness-dl.training.epochs": {
+                    "type": "number",
+                    "default": 30,
+                    "description": "Number of training epochs for the DNN model",
+                    "minimum": 10,
+                    "maximum": 200,
+                    "scope": "resource"
                 },
-                "<pytool-module>.path": {
-                    "default": [],
-                    "description": "When set to a path to <pytool-module> binary, extension will use that. NOTE: Using this option may slowdown server response time.",
-                    "scope": "resource",
-                    "items": {
-                        "type": "string"
-                    },
-                    "type": "array"
+                "fairness-dl.training.batchSize": {
+                    "type": "number",
+                    "default": 32,
+                    "description": "Batch size for training",
+                    "minimum": 8,
+                    "maximum": 256,
+                    "scope": "resource"
                 },
-                "<pytool-module>.importStrategy": {
-                    "default": "useBundled",
-                    "description": "Defines where `<pytool-module>` is imported from. This setting may be ignored if `<pytool-module>.path` is set.",
-                    "enum": [
-                        "useBundled",
-                        "fromEnvironment"
-                    ],
+                "fairness-dl.analysis.qidThreshold": {
+                    "type": "number",
+                    "default": 0.1,
+                    "description": "QID threshold (in bits) for flagging discriminatory instances",
+                    "minimum": 0,
+                    "maximum": 5,
+                    "scope": "resource"
+                },
+                "fairness-dl.analysis.maxSamples": {
+                    "type": "number",
+                    "default": 500,
+                    "description": "Maximum number of samples to analyze for QID metrics",
+                    "minimum": 100,
+                    "maximum": 10000,
+                    "scope": "resource"
+                },
+                "fairness-dl.search.globalIterations": {
+                    "type": "number",
+                    "default": 50,
+                    "description": "Number of iterations for global discriminatory instance search",
+                    "minimum": 10,
+                    "maximum": 500,
+                    "scope": "resource"
+                },
+                "fairness-dl.search.localNeighbors": {
+                    "type": "number",
+                    "default": 30,
+                    "description": "Number of neighbors for local discriminatory instance search",
+                    "minimum": 10,
+                    "maximum": 200,
+                    "scope": "resource"
+                },
+                "fairness-dl.server.port": {
+                    "type": "number",
+                    "default": 8765,
+                    "description": "Port number for the Python backend server",
+                    "minimum": 1024,
+                    "maximum": 65535,
+                    "scope": "window"
+                },
+                "fairness-dl.detection.autoDetectProtected": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically detect protected attributes (age, gender, race, etc.)",
+                    "scope": "resource"
+                },
+                "fairness-dl.visualization.showCharts": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Display interactive charts in results dashboard",
+                    "scope": "resource"
+                },
+                "fairness-dl.visualization.theme": {
+                    "type": "string",
+                    "default": "dark",
+                    "enum": ["dark", "light"],
                     "enumDescriptions": [
-                        "Always use the bundled version of `<pytool-module>`.",
-                        "Use `<pytool-module>` from environment, fallback to bundled version only if `<pytool-module>` not available in the environment."
+                        "Dark theme (matches VS Code dark themes)",
+                        "Light theme (matches VS Code light themes)"
                     ],
-                    "scope": "window",
-                    "type": "string"
+                    "description": "Color theme for visualization charts",
+                    "scope": "resource"
                 },
-                "<pytool-module>.interpreter": {
-                    "default": [],
-                    "description": "When set to a path to python executable, extension will use that to launch the server and any subprocess.",
-                    "scope": "resource",
-                    "items": {
-                        "type": "string"
-                    },
-                    "type": "array"
+                "fairness-dl.notifications.showProgress": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show progress notifications during analysis",
+                    "scope": "resource"
                 },
-                "<pytool-module>.showNotifications": {
-                    "default": "off",
-                    "description": "Controls when notifications are shown by this extension.",
-                    "enum": [
-                        "off",
-                        "onError",
-                        "onWarning",
-                        "always"
-                    ],
-                    "enumDescriptions": [
-                        "All notifications are turned off, any errors or warning are still available in the logs.",
-                        "Notifications are shown only in the case of an error.",
-                        "Notifications are shown for errors and warnings.",
-                        "Notifications are show for anything that the server chooses to show."
-                    ],
-                    "scope": "machine",
-                    "type": "string"
+                "fairness-dl.notifications.showStatusBar": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show analysis progress in status bar",
+                    "scope": "resource"
                 }
             }
         },

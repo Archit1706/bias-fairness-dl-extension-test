@@ -6,8 +6,42 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 let serverProcess: ChildProcess | null = null;
-const SERVER_PORT = 8765;
-const SERVER_URL = `http://localhost:${SERVER_PORT}`;
+let statusBarItem: vscode.StatusBarItem;
+
+// Configuration helper
+function getConfig() {
+    const config = vscode.workspace.getConfiguration('fairness-dl');
+    return {
+        // Training settings
+        epochs: config.get<number>('training.epochs', 30),
+        batchSize: config.get<number>('training.batchSize', 32),
+        // Analysis settings
+        qidThreshold: config.get<number>('analysis.qidThreshold', 0.1),
+        maxSamples: config.get<number>('analysis.maxSamples', 500),
+        // Search settings
+        globalIterations: config.get<number>('search.globalIterations', 50),
+        localNeighbors: config.get<number>('search.localNeighbors', 30),
+        // Server settings
+        serverPort: config.get<number>('server.port', 8765),
+        // Detection settings
+        autoDetectProtected: config.get<boolean>('detection.autoDetectProtected', true),
+        // Visualization settings
+        showCharts: config.get<boolean>('visualization.showCharts', true),
+        theme: config.get<string>('visualization.theme', 'dark'),
+        // Notification settings
+        showProgress: config.get<boolean>('notifications.showProgress', true),
+        showStatusBar: config.get<boolean>('notifications.showStatusBar', true),
+    };
+}
+
+// Get server URL from config
+function getServerUrl(): string {
+    const config = getConfig();
+    return `http://localhost:${config.serverPort}`;
+}
+
+// Default server port (can be changed via settings)
+const DEFAULT_SERVER_PORT = 8765;
 
 // Error message mappings for user-friendly messages
 const ERROR_MESSAGES: Record<string, string> = {
@@ -19,6 +53,14 @@ const ERROR_MESSAGES: Record<string, string> = {
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Fairness DL Extension activating...');
+
+    // Initialize status bar item
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    statusBarItem.text = '$(pulse) Fairness-DL';
+    statusBarItem.tooltip = 'Click to analyze a dataset for fairness';
+    statusBarItem.command = 'fairness-dl.analyzeDataset';
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
 
     // Start Python backend
     await startBackend(context);
@@ -35,12 +77,17 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 async function startBackend(context: vscode.ExtensionContext) {
+    const config = getConfig();
+    const serverPort = config.serverPort;
+    const serverUrl = `http://localhost:${serverPort}`;
+
     const pythonPath = vscode.workspace.getConfiguration('python').get<string>('defaultInterpreterPath') || 'python3';
     const backendPath = context.asAbsolutePath('python_backend');
 
-    console.log(`Starting backend at: ${backendPath}`);
+    console.log(`Starting backend at: ${backendPath} on port ${serverPort}`);
+    updateStatusBar('$(sync~spin) Starting server...', 'Initializing Python backend');
 
-    serverProcess = spawn(pythonPath, ['-m', 'uvicorn', 'bias_server:app', '--port', String(SERVER_PORT)], {
+    serverProcess = spawn(pythonPath, ['-m', 'uvicorn', 'bias_server:app', '--port', String(serverPort)], {
         cwd: backendPath,
         shell: true,
     });
@@ -75,22 +122,25 @@ async function startBackend(context: vscode.ExtensionContext) {
                     message: `Connecting to server (attempt ${attempts}/${maxAttempts})...`,
                     increment: 10,
                 });
+                updateStatusBar(`$(sync~spin) Connecting... [${attempts}/${maxAttempts}]`, 'Waiting for backend server');
 
                 try {
-                    await axios.get(`${SERVER_URL}/`, { timeout: 2000 });
+                    await axios.get(`${serverUrl}/`, { timeout: 2000 });
                     vscode.window.showInformationMessage('Fairness Analysis Server is ready!');
+                    resetStatusBar();
                     return;
                 } catch {
                     // Continue trying
                 }
             }
 
+            setStatusBarError('Server failed');
             showError(
                 'Server Startup Failed',
                 'The backend server failed to start. Please check:\n' +
                     '1. Python 3.8+ is installed\n' +
                     '2. Required packages are installed (pip install -r requirements.txt)\n' +
-                    '3. Port 8765 is not in use',
+                    `3. Port ${serverPort} is not in use`,
             );
         },
     );
@@ -202,12 +252,51 @@ function parseError(error: any): { title: string; detail: string; suggestion: st
 }
 
 /**
+ * Status bar update helpers
+ */
+function updateStatusBar(text: string, tooltip?: string, color?: string) {
+    const config = getConfig();
+    if (!config.showStatusBar) {
+        return;
+    }
+
+    statusBarItem.text = text;
+    if (tooltip) {
+        statusBarItem.tooltip = tooltip;
+    }
+    if (color) {
+        statusBarItem.backgroundColor = new vscode.ThemeColor(color);
+    } else {
+        statusBarItem.backgroundColor = undefined;
+    }
+    statusBarItem.show();
+}
+
+function resetStatusBar() {
+    statusBarItem.text = '$(pulse) Fairness-DL';
+    statusBarItem.tooltip = 'Click to analyze a dataset for fairness';
+    statusBarItem.backgroundColor = undefined;
+    statusBarItem.show();
+}
+
+function setStatusBarSuccess(message: string) {
+    updateStatusBar(`$(check) ${message}`, 'Analysis complete - click to analyze another dataset');
+    setTimeout(resetStatusBar, 5000);
+}
+
+function setStatusBarError(message: string) {
+    updateStatusBar(`$(error) ${message}`, 'Analysis failed - click to try again', 'statusBarItem.errorBackground');
+    setTimeout(resetStatusBar, 8000);
+}
+
+/**
  * Fetch column names from CSV file
  */
 async function fetchColumns(filePath: string): Promise<{ columns: string[]; sampleData: any[] } | null> {
+    const serverUrl = getServerUrl();
     try {
         const response = await axios.post(
-            `${SERVER_URL}/columns`,
+            `${serverUrl}/columns`,
             { file_path: filePath },
             { timeout: 10000 },
         );
@@ -295,14 +384,18 @@ async function analyzeDataset(uri: vscode.Uri) {
 }
 
 async function runAnalysis(filePath: string, labelColumn: string) {
+    const config = getConfig();
+    const serverUrl = getServerUrl();
+
     await vscode.window.withProgress(
         {
-            location: vscode.ProgressLocation.Notification,
+            location: config.showProgress ? vscode.ProgressLocation.Notification : vscode.ProgressLocation.Window,
             title: 'Fairness Analysis',
             cancellable: false,
         },
         async (progress) => {
             const startTime = Date.now();
+            const fileName = path.basename(filePath);
 
             try {
                 // Step 1: Train model (0-40%)
@@ -310,13 +403,15 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                     increment: 0,
                     message: 'Step 1/4: Training neural network model...',
                 });
+                updateStatusBar('$(sync~spin) Training DNN...', `Training on ${fileName}`);
 
                 const trainResponse = await axios.post(
-                    `${SERVER_URL}/train`,
+                    `${serverUrl}/train`,
                     {
                         file_path: filePath,
                         label_column: labelColumn,
-                        num_epochs: 30,
+                        num_epochs: config.epochs,
+                        batch_size: config.batchSize,
                     },
                     { timeout: 300000 },
                 );
@@ -326,12 +421,17 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                     increment: 40,
                     message: `Step 1/4: Training complete (${trainTime}s) - ${trainResponse.data.accuracy.toFixed(1)}% accuracy`,
                 });
+                updateStatusBar(
+                    `$(check) Trained [${trainResponse.data.accuracy.toFixed(0)}%]`,
+                    `Training complete: ${trainResponse.data.accuracy.toFixed(1)}% accuracy`,
+                );
 
                 // Step 2: Analyze (40-65%)
                 progress.report({
                     increment: 0,
                     message: 'Step 2/4: Computing fairness metrics (QID analysis)...',
                 });
+                updateStatusBar('$(beaker) Computing QID...', 'Calculating fairness metrics');
 
                 const protectedFeatures = trainResponse.data.protected_features;
                 const protectedValues: Record<string, number[]> = {};
@@ -340,13 +440,14 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                 });
 
                 const analyzeResponse = await axios.post(
-                    `${SERVER_URL}/analyze`,
+                    `${serverUrl}/analyze`,
                     {
                         file_path: filePath,
                         label_column: labelColumn,
                         sensitive_features: protectedFeatures,
                         protected_values: protectedValues,
-                        max_samples: 500,
+                        max_samples: config.maxSamples,
+                        qid_threshold: config.qidThreshold,
                     },
                     { timeout: 120000 },
                 );
@@ -355,19 +456,24 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                     increment: 25,
                     message: `Step 2/4: QID metrics computed - Mean QID: ${analyzeResponse.data.qid_metrics.mean_qid.toFixed(4)} bits`,
                 });
+                updateStatusBar(
+                    `$(graph) QID: ${analyzeResponse.data.qid_metrics.mean_qid.toFixed(2)} bits`,
+                    `Mean QID: ${analyzeResponse.data.qid_metrics.mean_qid.toFixed(4)} bits`,
+                );
 
                 // Step 3: Search (65-85%)
                 progress.report({
                     increment: 0,
                     message: 'Step 3/4: Searching for discriminatory instances...',
                 });
+                updateStatusBar('$(search) Searching...', 'Finding discriminatory instances');
 
                 const searchResponse = await axios.post(
-                    `${SERVER_URL}/search`,
+                    `${serverUrl}/search`,
                     {
                         protected_values: protectedValues,
-                        num_iterations: 50,
-                        num_neighbors: 30,
+                        num_iterations: config.globalIterations,
+                        num_neighbors: config.localNeighbors,
                     },
                     { timeout: 120000 },
                 );
@@ -376,19 +482,24 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                     increment: 20,
                     message: `Step 3/4: Found ${searchResponse.data.search_results.num_found} discriminatory instances`,
                 });
+                updateStatusBar(
+                    `$(bug) Found ${searchResponse.data.search_results.num_found}`,
+                    `Found ${searchResponse.data.search_results.num_found} discriminatory instances`,
+                );
 
                 // Step 4: Debug (85-100%)
                 progress.report({
                     increment: 0,
                     message: 'Step 4/4: Localizing biased layers and neurons...',
                 });
+                updateStatusBar('$(telescope) Debugging...', 'Localizing biased neurons');
 
                 const debugResponse = await axios.post(
-                    `${SERVER_URL}/debug`,
+                    `${serverUrl}/debug`,
                     {
                         protected_values: protectedValues,
-                        num_iterations: 50,
-                        num_neighbors: 30,
+                        num_iterations: config.globalIterations,
+                        num_neighbors: config.localNeighbors,
                     },
                     { timeout: 120000 },
                 );
@@ -409,11 +520,15 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                     search: searchResponse.data,
                     debug: debugResponse.data,
                     metadata: {
-                        file: path.basename(filePath),
+                        file: fileName,
                         labelColumn: labelColumn,
                         totalTime: totalTime,
                     },
+                    config: config,
                 });
+
+                // Update status bar with success
+                setStatusBarSuccess(`Done [${analyzeResponse.data.qid_metrics.num_discriminatory} issues]`);
 
                 vscode.window.showInformationMessage(
                     `Fairness analysis complete! Found ${analyzeResponse.data.qid_metrics.num_discriminatory} potentially discriminatory instances.`,
@@ -422,6 +537,7 @@ async function runAnalysis(filePath: string, labelColumn: string) {
                 console.error('Analysis error:', error);
                 const parsed = parseError(error);
                 showError(parsed.title, `${parsed.detail}\n\nSuggestion: ${parsed.suggestion}`);
+                setStatusBarError('Analysis failed');
             }
         },
     );
@@ -978,8 +1094,20 @@ function getWebviewHtml(results: any): string {
             </div>
         </div>
 
+        <!-- Charts Row -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+            <div class="chart-container">
+                <div class="chart-title">QID Distribution Histogram</div>
+                <div id="qid-histogram" style="height: 320px;"></div>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">Disparate Impact Gauge</div>
+                <div id="disparate-impact-gauge" style="height: 320px;"></div>
+            </div>
+        </div>
+
         <div class="chart-container">
-            <div class="chart-title">QID Distribution of Discriminatory Instances</div>
+            <div class="chart-title">QID Values by Instance (Scatter Plot)</div>
             <div id="qid-chart" style="height: 350px;"></div>
         </div>
     </div>
@@ -1094,8 +1222,92 @@ function getWebviewHtml(results: any): string {
             yaxis: { gridcolor: '#3c3c3c', zerolinecolor: '#3c3c3c' }
         };
 
-        // QID Distribution Chart
+        // QID values for charts
         const instances = ${JSON.stringify(searchResults.discriminatory_instances)};
+        const qidValues = instances.map(inst => inst.qid);
+        const disparateImpact = ${qidMetrics.mean_disparate_impact};
+
+        // 1. QID Histogram
+        if (qidValues.length > 0) {
+            const histogramTrace = {
+                x: qidValues,
+                type: 'histogram',
+                nbinsx: 20,
+                marker: {
+                    color: '#ff9800',
+                    line: { color: '#fff', width: 1 }
+                },
+                opacity: 0.85,
+                hovertemplate: 'QID Range: %{x}<br>Count: %{y}<extra></extra>'
+            };
+
+            Plotly.newPlot('qid-histogram', [histogramTrace], {
+                ...chartLayout,
+                margin: { t: 10, r: 20, b: 50, l: 50 },
+                xaxis: {
+                    ...chartLayout.xaxis,
+                    title: { text: 'QID (bits)', font: { color: '#a0a0a0' } }
+                },
+                yaxis: {
+                    ...chartLayout.yaxis,
+                    title: { text: 'Frequency', font: { color: '#a0a0a0' } }
+                },
+                bargap: 0.05
+            }, { responsive: true });
+        }
+
+        // 2. Disparate Impact Gauge
+        const gaugeValue = disparateImpact * 100;
+        const gaugeColor = disparateImpact >= 0.8 ? '#4caf50' : (disparateImpact >= 0.6 ? '#ff9800' : '#f44336');
+
+        const gaugeTrace = {
+            type: 'indicator',
+            mode: 'gauge+number+delta',
+            value: gaugeValue,
+            title: {
+                text: 'Disparate Impact Ratio',
+                font: { size: 16, color: '#e4e4e4' }
+            },
+            number: {
+                suffix: '%',
+                font: { size: 36, color: '#e4e4e4' }
+            },
+            delta: {
+                reference: 80,
+                increasing: { color: '#4caf50' },
+                decreasing: { color: '#f44336' },
+                font: { size: 14 }
+            },
+            gauge: {
+                axis: {
+                    range: [0, 100],
+                    tickwidth: 1,
+                    tickcolor: '#3c3c3c',
+                    tickfont: { color: '#a0a0a0' }
+                },
+                bar: { color: gaugeColor, thickness: 0.75 },
+                bgcolor: '#1e1e1e',
+                borderwidth: 2,
+                bordercolor: '#3c3c3c',
+                steps: [
+                    { range: [0, 60], color: 'rgba(244, 67, 54, 0.3)' },
+                    { range: [60, 80], color: 'rgba(255, 152, 0, 0.3)' },
+                    { range: [80, 100], color: 'rgba(76, 175, 80, 0.3)' }
+                ],
+                threshold: {
+                    line: { color: '#ff5252', width: 4 },
+                    thickness: 0.75,
+                    value: 80
+                }
+            }
+        };
+
+        Plotly.newPlot('disparate-impact-gauge', [gaugeTrace], {
+            ...chartLayout,
+            margin: { t: 50, r: 30, b: 30, l: 30 }
+        }, { responsive: true });
+
+        // 3. QID Scatter Plot (original chart)
         if (instances.length > 0) {
             const trace = {
                 x: instances.map((_, i) => i + 1),
