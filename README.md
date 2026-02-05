@@ -112,7 +112,7 @@ npm run vsce-package
 
 Then install:
 ```bash
-code --install-extension fairness-dl-debugger.vsix
+code --install-extension fairlint-dl.vsix
 ```
 
 ---

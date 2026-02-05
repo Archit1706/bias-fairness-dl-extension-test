@@ -1,12 +1,12 @@
 {
-    "name": "fairness-dl-debugger",
-    "displayName": "Fairness DL Debugger",
+    "name": "fairlint-dl",
+    "displayName": "FairLint-DL",
     "description": "Deep Learning-based fairness debugging for ML datasets using PyTorch and information-theoretic analysis (DICE/NeuFair inspired)",
     "version": "1.0.0",
     "preview": true,
     "serverInfo": {
-        "name": "Fairness DL Debugger",
-        "module": "fairness-dl"
+        "name": "FairLint-DL",
+        "module": "fairlint-dl"
     },
     "publisher": "fairness-tools",
     "license": "MIT",
@@ -49,7 +49,7 @@
     "capabilities": {
         "virtualWorkspaces": {
             "supported": false,
-            "description": "Virtual Workspaces are not supported with <pytool-display-name>."
+            "description": "Virtual Workspaces are not supported with FairLint-DL."
         }
     },
     "activationEvents": [
@@ -68,13 +68,13 @@
         "lint": "eslint src --ext ts",
         "format-check": "prettier --check 'src/**/*.ts' 'build/**/*.yml' '.github/**/*.yml'",
         "test": "node ./out/test/runTest.js",
-        "vsce-package": "vsce package -o <pytool-module>.vsix"
+        "vsce-package": "vsce package -o fairlint-dl.vsix"
     },
     "contributes": {
         "configuration": {
-            "title": "Fairness DL Debugger",
+            "title": "FairLint-DL",
             "properties": {
-                "fairness-dl.training.epochs": {
+                "fairlint-dl.training.epochs": {
                     "type": "number",
                     "default": 30,
                     "description": "Number of training epochs for the DNN model",
@@ -82,7 +82,7 @@
                     "maximum": 200,
                     "scope": "resource"
                 },
-                "fairness-dl.training.batchSize": {
+                "fairlint-dl.training.batchSize": {
                     "type": "number",
                     "default": 32,
                     "description": "Batch size for training",
@@ -90,7 +90,7 @@
                     "maximum": 256,
                     "scope": "resource"
                 },
-                "fairness-dl.analysis.qidThreshold": {
+                "fairlint-dl.analysis.qidThreshold": {
                     "type": "number",
                     "default": 0.1,
                     "description": "QID threshold (in bits) for flagging discriminatory instances",
@@ -98,7 +98,7 @@
                     "maximum": 5,
                     "scope": "resource"
                 },
-                "fairness-dl.analysis.maxSamples": {
+                "fairlint-dl.analysis.maxSamples": {
                     "type": "number",
                     "default": 500,
                     "description": "Maximum number of samples to analyze for QID metrics",
@@ -106,7 +106,7 @@
                     "maximum": 10000,
                     "scope": "resource"
                 },
-                "fairness-dl.search.globalIterations": {
+                "fairlint-dl.search.globalIterations": {
                     "type": "number",
                     "default": 50,
                     "description": "Number of iterations for global discriminatory instance search",
@@ -114,7 +114,7 @@
                     "maximum": 500,
                     "scope": "resource"
                 },
-                "fairness-dl.search.localNeighbors": {
+                "fairlint-dl.search.localNeighbors": {
                     "type": "number",
                     "default": 30,
                     "description": "Number of neighbors for local discriminatory instance search",
@@ -122,7 +122,7 @@
                     "maximum": 200,
                     "scope": "resource"
                 },
-                "fairness-dl.server.port": {
+                "fairlint-dl.server.port": {
                     "type": "number",
                     "default": 8765,
                     "description": "Port number for the Python backend server",
@@ -130,22 +130,25 @@
                     "maximum": 65535,
                     "scope": "window"
                 },
-                "fairness-dl.detection.autoDetectProtected": {
+                "fairlint-dl.detection.autoDetectProtected": {
                     "type": "boolean",
                     "default": true,
                     "description": "Automatically detect protected attributes (age, gender, race, etc.)",
                     "scope": "resource"
                 },
-                "fairness-dl.visualization.showCharts": {
+                "fairlint-dl.visualization.showCharts": {
                     "type": "boolean",
                     "default": true,
                     "description": "Display interactive charts in results dashboard",
                     "scope": "resource"
                 },
-                "fairness-dl.visualization.theme": {
+                "fairlint-dl.visualization.theme": {
                     "type": "string",
                     "default": "dark",
-                    "enum": ["dark", "light"],
+                    "enum": [
+                        "dark",
+                        "light"
+                    ],
                     "enumDescriptions": [
                         "Dark theme (matches VS Code dark themes)",
                         "Light theme (matches VS Code light themes)"
@@ -153,13 +156,13 @@
                     "description": "Color theme for visualization charts",
                     "scope": "resource"
                 },
-                "fairness-dl.notifications.showProgress": {
+                "fairlint-dl.notifications.showProgress": {
                     "type": "boolean",
                     "default": true,
                     "description": "Show progress notifications during analysis",
                     "scope": "resource"
                 },
-                "fairness-dl.notifications.showStatusBar": {
+                "fairlint-dl.notifications.showStatusBar": {
                     "type": "boolean",
                     "default": true,
                     "description": "Show analysis progress in status bar",
@@ -169,19 +172,19 @@
         },
         "commands": [
             {
-                "command": "fairness-dl.analyzeDataset",
-                "title": "Analyze Dataset for Fairness"
+                "command": "fairlint-dl.analyzeDataset",
+                "title": "FairLint-DL: Analyze Dataset"
             },
             {
-                "command": "fairness-dl.analyzeFromMenu",
-                "title": "Fairness: Analyze This Dataset"
+                "command": "fairlint-dl.analyzeFromMenu",
+                "title": "FairLint-DL: Analyze This Dataset"
             }
         ],
         "menus": {
             "explorer/context": [
                 {
                     "when": "resourceExtname == .csv",
-                    "command": "fairness-dl.analyzeFromMenu",
+                    "command": "fairlint-dl.analyzeFromMenu",
                     "group": "navigation"
                 }
             ]

@@ -17,7 +17,7 @@ from utils.data_loader import DataPreprocessor
 from analyzers.causal_debugger import CausalDebugger
 
 
-app = FastAPI(title="Fairness Analysis API")
+app = FastAPI(title="FairLint-DL Analysis API")
 
 # Enable CORS for VS Code extension
 app.add_middleware(

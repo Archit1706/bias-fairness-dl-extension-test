@@ -10,7 +10,7 @@ let statusBarItem: vscode.StatusBarItem;
 
 // Configuration helper
 function getConfig() {
-    const config = vscode.workspace.getConfiguration('fairness-dl');
+    const config = vscode.workspace.getConfiguration('fairlint-dl');
     return {
         // Training settings
         epochs: config.get<number>('training.epochs', 30),
@@ -56,9 +56,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize status bar item
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    statusBarItem.text = '$(pulse) Fairness-DL';
+    statusBarItem.text = '$(pulse) FairLint-DL';
     statusBarItem.tooltip = 'Click to analyze a dataset for fairness';
-    statusBarItem.command = 'fairness-dl.analyzeDataset';
+    statusBarItem.command = 'fairlint-dl.analyzeDataset';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
@@ -66,11 +66,11 @@ export async function activate(context: vscode.ExtensionContext) {
     await startBackend(context);
 
     // Register commands
-    context.subscriptions.push(vscode.commands.registerCommand('fairness-dl.analyzeDataset', analyzeDataset));
+    context.subscriptions.push(vscode.commands.registerCommand('fairlint-dl.analyzeDataset', analyzeDataset));
 
     // Register file context menu
     context.subscriptions.push(
-        vscode.commands.registerCommand('fairness-dl.analyzeFromMenu', async (uri: vscode.Uri) => {
+        vscode.commands.registerCommand('fairlint-dl.analyzeFromMenu', async (uri: vscode.Uri) => {
             await analyzeDataset(uri);
         }),
     );
@@ -273,7 +273,7 @@ function updateStatusBar(text: string, tooltip?: string, color?: string) {
 }
 
 function resetStatusBar() {
-    statusBarItem.text = '$(pulse) Fairness-DL';
+    statusBarItem.text = '$(pulse) FairLint-DL';
     statusBarItem.tooltip = 'Click to analyze a dataset for fairness';
     statusBarItem.backgroundColor = undefined;
     statusBarItem.show();
